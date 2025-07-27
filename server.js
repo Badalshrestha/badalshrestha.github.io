@@ -7,11 +7,51 @@ const rateLimit = require('express-rate-limit');
 const path = require('path');
 require('dotenv').config();
 
-const config = require('./config/database');
-const Contact = require('./models/Contact');
-
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Contact Schema (inline)
+const contactSchema = new mongoose.Schema({
+    name: {
+        type: String,
+        required: [true, 'Name is required'],
+        trim: true,
+        maxlength: [100, 'Name cannot exceed 100 characters']
+    },
+    email: {
+        type: String,
+        required: [true, 'Email is required'],
+        trim: true,
+        lowercase: true,
+        match: [
+            /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
+            'Please provide a valid email address'
+        ]
+    },
+    phone: {
+        type: String,
+        trim: true,
+        maxlength: [20, 'Phone number cannot exceed 20 characters'],
+        default: ''
+    },
+    message: {
+        type: String,
+        required: [true, 'Message is required'],
+        trim: true,
+        maxlength: [1000, 'Message cannot exceed 1000 characters']
+    },
+    submittedAt: {
+        type: Date,
+        default: Date.now
+    },
+    status: {
+        type: String,
+        enum: ['new', 'read', 'replied', 'archived'],
+        default: 'new'
+    }
+});
+
+const Contact = mongoose.model('Contact', contactSchema);
 
 // Security middleware
 app.use(helmet());
@@ -20,7 +60,7 @@ app.use(cors());
 // Rate limiting
 const limiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100, // limit each IP to 100 requests per windowMs
+    max: 100,
     message: 'Too many requests from this IP, please try again later.'
 });
 app.use('/api/', limiter);
@@ -32,15 +72,22 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 // Serve static files
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Connect to MongoDB
-mongoose.connect(config.mongoURI, {
+// MongoDB connection (inline config)
+const mongoURI = process.env.MONGODB_URI || 'mongodb://localhost:27017/portfolio_db';
+mongoose.connect(mongoURI, {
     useNewUrlParser: true,
     useUnifiedTopology: true,
 })
-.then(() => console.log('MongoDB connected successfully'))
-.catch(err => console.error('MongoDB connection error:', err));
+.then(() => {
+    console.log('MongoDB connected successfully');
+    console.log('Database:', mongoose.connection.name);
+})
+.catch(err => {
+    console.error('MongoDB connection error:', err);
+    console.log('Continuing without database...');
+});
 
-// Email transporter configuration
+// Email transporter configuration - CORRECTED METHOD NAME
 const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: {
@@ -50,8 +97,6 @@ const transporter = nodemailer.createTransport({
 });
 
 // API Routes
-
-// Contact form submission
 app.post('/api/contact', async (req, res) => {
     try {
         const { name, email, phone, message } = req.body;
@@ -73,16 +118,21 @@ app.post('/api/contact', async (req, res) => {
             });
         }
 
-        // Save to database
-        const newContact = new Contact({
-            name: name.trim(),
-            email: email.trim().toLowerCase(),
-            phone: phone ? phone.trim() : '',
-            message: message.trim(),
-            submittedAt: new Date()
-        });
+        // Save to database (if connected)
+        if (mongoose.connection.readyState === 1) {
+            const newContact = new Contact({
+                name: name.trim(),
+                email: email.trim().toLowerCase(),
+                phone: phone ? phone.trim() : '',
+                message: message.trim(),
+                submittedAt: new Date()
+            });
 
-        await newContact.save();
+            await newContact.save();
+            console.log('Contact saved to database');
+        } else {
+            console.log('Database not connected, skipping save');
+        }
 
         // Send email notification
         const mailOptions = {
@@ -107,17 +157,16 @@ app.post('/api/contact', async (req, res) => {
                         <h3 style="color: #333; margin-top: 0;">Message:</h3>
                         <p style="line-height: 1.6; color: #555;">${message}</p>
                     </div>
-                    
-                    <div style="text-align: center; margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee;">
-                        <p style="color: #666; font-size: 12px;">
-                            This email was sent from your portfolio website contact form.
-                        </p>
-                    </div>
                 </div>
             `
         };
 
-        await transporter.sendMail(mailOptions);
+        try {
+            await transporter.sendMail(mailOptions);
+            console.log('Email sent successfully');
+        } catch (emailError) {
+            console.error('Email sending failed:', emailError.message);
+        }
 
         res.status(200).json({
             success: true,
@@ -134,9 +183,16 @@ app.post('/api/contact', async (req, res) => {
     }
 });
 
-// Get all contacts (admin endpoint - you might want to add authentication)
+// Get all contacts (admin endpoint)
 app.get('/api/contacts', async (req, res) => {
     try {
+        if (mongoose.connection.readyState !== 1) {
+            return res.status(503).json({
+                success: false,
+                message: 'Database not connected'
+            });
+        }
+
         const contacts = await Contact.find()
             .sort({ submittedAt: -1 })
             .limit(100);
